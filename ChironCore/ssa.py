@@ -1,222 +1,25 @@
 import ChironAST.ChironAST as ChironAST
+import cfg.ChironCFG as ChironCFG
 import networkx as nx
+import copy as cp
 
 class SSAConverter:
     def __init__(self, ir, cfg):
         self.ir = ir
         self.cfg = cfg
-        self.globals = set()
-        self.varBlocks = {}
+        self.ssa = nx.DiGraph()
+
+        self.globals = None
+        self.varBlocks = None
+
         self.counter = {}
         self.stack = {}
 
-    def getVariablesExpr(self, expr):
-        vars = set()
-        if isinstance(expr, ChironAST.Var):
-            vars.add(expr.varname)
-        elif isinstance(expr, ChironAST.BinArithOp):
-            vars = vars.union(self.getVariablesExpr(expr.lexpr))
-            vars = vars.union(self.getVariablesExpr(expr.rexpr))
-        elif isinstance(expr, ChironAST.UnaryArithOp):
-            vars = vars.union(self.getVariablesExpr(expr.expr))
-        elif isinstance(expr, ChironAST.BinCondOp):
-            vars = vars.union(self.getVariablesExpr(expr.lexpr))
-            vars = vars.union(self.getVariablesExpr(expr.rexpr))
-        elif isinstance(expr, ChironAST.NOT):
-            vars = vars.union(self.getVariablesExpr(expr.expr))
-
-        return vars
-
-    def getVariablesInstr(self, instr):
-        vars = set()
-        
-        if isinstance(instr, ChironAST.AssignmentCommand):
-            vars.add(instr.lvar.varname)
-            vars = vars.union(self.getVariablesExpr(instr.rexpr))
-        elif isinstance(instr, ChironAST.ConditionCommand):
-            vars = vars.union(self.getVariablesExpr(instr.cond))
-        elif isinstance(instr, ChironAST.AssertCommand):
-            vars = vars.union(self.getVariablesExpr(instr.cond))
-        elif isinstance(instr, ChironAST.MoveCommand):
-            vars = vars.union(self.getVariablesExpr(instr.expr))
-        elif isinstance(instr, ChironAST.GotoCommand):
-            vars = vars.union(self.getVariablesExpr(instr.xcor))
-            vars = vars.union(self.getVariablesExpr(instr.ycor))
-
-        return vars
-    
-    def getGlobals(self):
-        for node in self.cfg.nodes():
-            varkill = set()
-            for instr, _ in node.instrlist:
-                if isinstance(instr, ChironAST.AssignmentCommand):
-                    rvars = self.getVariablesExpr(instr.rexpr)
-                    for var in rvars:
-                        if var not in varkill:
-                            self.globals.add(var)
-
-                    varkill.add(instr.lvar.varname)
-                    if self.varBlocks.get(instr.lvar.varname) is None:
-                        self.varBlocks[instr.lvar.varname] = set()
-                    self.varBlocks[instr.lvar.varname].add(node)
-                if isinstance(instr, ChironAST.ConditionCommand):
-                    rvars = self.getVariablesExpr(instr.cond)
-                    for var in rvars:
-                        if var not in varkill:
-                            self.globals.add(var)
-                if isinstance(instr, ChironAST.AssertCommand):
-                    rvars = self.getVariablesExpr(instr.cond)
-                    for var in rvars:
-                        if var not in varkill:
-                            self.globals.add(var)
-                if isinstance(instr, ChironAST.MoveCommand):
-                    rvars = self.getVariablesExpr(instr.expr)
-                    for var in rvars:
-                        if var not in varkill:
-                            self.globals.add(var)
-                if isinstance(instr, ChironAST.GotoCommand):
-                    rvars = self.getVariablesExpr(instr.xcor)
-                    for var in rvars:
-                        if var not in varkill:
-                            self.globals.add(var)
-                    rvars = self.getVariablesExpr(instr.ycor)
-                    for var in rvars:
-                        if var not in varkill:
-                            self.globals.add(var)
-    
-        return self.globals
-
-    def addPhiFunctions(self):
-        for var in self.globals:
-            if self.varBlocks.get(var) is None:
-                continue
-
-            worklist = self.varBlocks[var]
-            while len(worklist) > 0:
-                node = worklist.pop()
-                
-                for block in self.cfg.df[node]:
-                    found = False
-                    for instr, _ in block.instrlist:
-                        if not isinstance(instr, ChironAST.PhiAssignmentCommand):
-                            continue
-                        if instr.lvar.varname == var:
-                            found = True
-                            # instr.varlist.append(ChironAST.Var(var))
-                            break
-
-                    if not found:
-                        block.prepend((ChironAST.PhiAssignmentCommand(ChironAST.Var(var), []), 1))
-                        worklist.add(block)
-
-    def renameVariables(self):
-        for var in self.globals:
-            self.counter[var] = 0
-            self.stack[var] = []
-        for node in self.cfg.nodes():
-            if node.name == "START":
-                self.rename(node)
-
-    def newName(self, var):
-        var = var.split("#")[0]
-        self.stack[var].append(var + "#" + str(self.counter[var]))
-        self.counter[var] += 1
-        return self.stack[var][-1]
-    
-    def renameVar(self, expr, oldvar, newvar):
-        if isinstance(expr, ChironAST.Var):
-            if expr.varname.split('#')[0] == oldvar:
-                return ChironAST.Var(newvar)
-            return expr
-        if isinstance(expr, ChironAST.BinArithOp):
-            return ChironAST.BinArithOp(self.renameVar(expr.lexpr, oldvar, newvar), self.renameVar(expr.rexpr, oldvar, newvar), expr.symbol)
-        if isinstance(expr, ChironAST.UnaryArithOp):
-            return ChironAST.UnaryArithOp(self.renameVar(expr.expr, oldvar, newvar), expr.symbol)
-        if isinstance(expr, ChironAST.BinCondOp):
-            return ChironAST.BinCondOp(self.renameVar(expr.lexpr, oldvar, newvar), self.renameVar(expr.rexpr, oldvar, newvar), expr.symbol)
-        if isinstance(expr, ChironAST.NOT):
-            return ChironAST.NOT(self.renameVar(expr.expr, oldvar, newvar))
-        return expr
-
-    def rename(self, block):
-        print("Renaming block: ", block.name)
-        for instr, _ in block.instrlist:
-            if isinstance(instr, ChironAST.PhiAssignmentCommand):
-                print("renaming phi function: ", instr, " to ", end="")
-                instr.lvar.varname = self.newName(instr.lvar.varname)
-                print(instr)
-        
-        for instr, _ in block.instrlist:
-            print("Renaming instruction: ", instr, " to ", end="")
-            if isinstance(instr, ChironAST.AssignmentCommand):
-                rvars = self.getVariablesExpr(instr.rexpr)
-                for var in rvars:
-                    var = var.split("#")[0]
-                    if var in self.globals and len(self.stack[var]) > 0:
-                        instr.rexpr = self.renameVar(instr.rexpr, var, self.stack[var][-1])
-                instr.lvar.varname = self.newName(instr.lvar.varname)
-            if isinstance(instr, ChironAST.ConditionCommand):
-                rvars = self.getVariablesExpr(instr.cond)
-                for var in rvars:
-                    var = var.split("#")[0]
-                    if var in self.globals and len(self.stack[var]) > 0:
-                        instr.cond = self.renameVar(instr.cond, var, self.stack[var][-1])
-            if isinstance(instr, ChironAST.AssertCommand):
-                rvars = self.getVariablesExpr(instr.cond)
-                for var in rvars:
-                    var = var.split("#")[0]
-                    if var in self.globals and len(self.stack[var]) > 0:
-                        instr.cond = self.renameVar(instr.cond, var, self.stack[var][-1])
-            if isinstance(instr, ChironAST.MoveCommand):
-                rvars = self.getVariablesExpr(instr.expr)
-                for var in rvars:
-                    var = var.split("#")[0]
-                    if var in self.globals and len(self.stack[var]) > 0:
-                        instr.expr = self.renameVar(instr.expr, var, self.stack[var][-1])
-            if isinstance(instr, ChironAST.GotoCommand):
-                rvars = self.getVariablesExpr(instr.xcor)
-                for var in rvars:
-                    var = var.split("#")[0]
-                    if var in self.globals and len(self.stack[var]) > 0:
-                        instr.xcor = self.renameVar(instr.xcor, var, self.stack[var][-1])
-                rvars = self.getVariablesExpr(instr.ycor)
-                for var in rvars:
-                    var = var.split("#")[0]
-                    if var in self.globals and len(self.stack[var]) > 0:
-                        instr.ycor = self.renameVar(instr.ycor, var, self.stack[var][-1])
-
-            print(instr)
-
-        for succ in self.cfg.successors(block):
-            print("Filing phi functions for block: ", succ.name)
-            for instr, _ in succ.instrlist:
-                if not isinstance(instr, ChironAST.PhiAssignmentCommand):
-                    continue
-                var = instr.lvar.varname
-                var = var.split("#")[0]
-                if len(self.stack[var]) == 0:
-                    continue
-                
-                instr.varlist.append(ChironAST.Var(self.stack[var][-1]))
-
-        for succ in self.cfg.successors(block):
-            # check if succ is next in dominator tree
-            if self.cfg.idom[succ] == block:
-                self.rename(succ) 
-
-        for instr, _ in block.instrlist:
-            if isinstance(instr, ChironAST.PhiAssignmentCommand) or isinstance(instr, ChironAST.AssignmentCommand):
-                var = instr.lvar.varname
-                var = var.split("#")[0]
-                self.stack[var].pop()
-
-        
     def convert(self):
-
         self.getGlobals()
-        print("Globals: ", self.globals)
         self.addPhiFunctions()
-        # dump newly created CFG image
+
+        # draw cfg with phi functions
         G = self.cfg.nxgraph
         labels = {}
         for node in self.cfg:
@@ -226,10 +29,10 @@ class SSAConverter:
         A = nx.nx_agraph.to_agraph(G)
         A.layout('dot')
         A.draw('cfg_before_renaming.png')
+
         self.renameVariables()
 
-
-        # dump newly created CFG image
+        # draw cfg after renaming
         G = self.cfg.nxgraph
         labels = {}
         for node in self.cfg:
@@ -240,8 +43,116 @@ class SSAConverter:
         A.layout('dot')
         A.draw('cfg_after_renaming.png')
         
+    def getGlobals(self):
+        self.globals = set()
+        self.varBlocks = {}
 
-
+        for block in self.cfg.nodes():
+            varkill = set()
+            for instr, _ in block.instrlist:
+                for var in instr.getReadVariables():
+                    if var not in varkill:
+                        self.globals.add(var)
+                for var in instr.getWriteVariables():
+                    varkill.add(var)
+                    if var not in self.varBlocks:
+                        self.varBlocks[var] = set()
+                    self.varBlocks[var].add(block)
         
+        return self.globals
+    
+    def addPhiFunctions(self):
+        for var in self.globals:
+            if var not in self.varBlocks:
+                continue
+            worklist = self.varBlocks[var]
+            while len(worklist) > 0:
+                block = worklist.pop()
+                for node in self.cfg.df[block]:
+                    found = False
+                    for instr, _ in node.instrlist:
+                        if isinstance(instr, ChironAST.PhiAssignmentCommand) and instr.lvar.varname == var:
+                            found = True
+                            break
 
+                    if not found:
+                        instr = ChironAST.PhiAssignmentCommand(ChironAST.Var(var), [])
+                        node.prepend((instr, 1))
+                        worklist.add(node)
+
+    def renameVariables(self):
+        for var in self.globals:
+            self.counter[var] = 0
+            self.stack[var] = []
+
+        for block in self.cfg.nodes():
+            if block.name == "START":
+                self.rename(block)
+
+    def rename(self, block):
+        newblock = cp.deepcopy(block)
+        newblock.instrlist = []
+
+        for instr, target in block.instrlist:
+            if not isinstance(instr, ChironAST.PhiAssignmentCommand):
+                continue
+            print("old instr: " + str(instr))
+            newinstr = ChironAST.PhiAssignmentCommand(ChironAST.Var(self.newName(instr.lvar.varname)), instr.varlist)
+            print("new instr: " + str(newinstr))
+            newblock.append((newinstr, target))
+        
+        for instr, _ in block.instrlist:
+            if isinstance(instr, ChironAST.PhiAssignmentCommand):
+                continue
+            print("old instr: " + str(instr))
+            newinstr = cp.deepcopy(instr)
+            if isinstance(newinstr, ChironAST.AssignmentCommand):
+                temp = cp.deepcopy(newinstr.rexpr)
+                for var in temp.getVariables():
+                    temp.renameVariable(var, self.stack[var][-1])
+                newinstr.rexpr = temp
+                newinstr.lvar = ChironAST.Var(self.newName(newinstr.lvar.varname))
+                print("new instr: " + str(newinstr))
+                continue
+
+            for var in newinstr.getReadVariables():
+                if len(self.stack[self.originalName(var)]) == 0:
+                    print("stack for " + var + " is empty")
+                    continue
+                print("renaming " + var + " to " + self.stack[self.originalName(var)][-1] + " in " + str(type(newinstr)))
+                newinstr.renameReadVariable(var, self.stack[self.originalName(var)][-1])
+                
+            for var in newinstr.getWriteVariables():
+                newinstr.renameWriteVariable(var, self.newName(var))
+            print("new instr: " + str(newinstr))
+            newblock.append((newinstr, target))
             
+        for succ in self.cfg.successors(block):
+            for instr, _ in succ.instrlist:
+                if not isinstance(instr, ChironAST.PhiAssignmentCommand):
+                    continue
+                if len(self.stack[self.originalName(instr.lvar.varname)]) == 0:
+                    print("stack for " + instr.lvar.varname + " is empty")
+                    continue
+                instr.varlist.append(self.stack[self.originalName(instr.lvar.varname)][-1])
+
+        for succ in self.cfg.successors(block):
+            # succ should be in dominator tree of block
+            if self.cfg.idom[succ] == block:
+                self.rename(succ)
+
+        for instr, _ in block.instrlist:
+            for var in instr.getWriteVariables():
+                self.stack[var].pop()
+
+        block.instrlist = newblock.instrlist
+
+
+    def newName(self, var):
+        self.stack[var].append(var + "#" + str(self.counter[var]))
+        self.counter[var] += 1
+        return self.stack[var][-1]
+    
+    def originalName(self, var):
+        return var.split("#")[0]
+    
